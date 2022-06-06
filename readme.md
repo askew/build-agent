@@ -1,5 +1,7 @@
 # Azure DevOps Self-hosted Build Agent
 
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Faskew%2Fbuild-agent%2Fmain%2Fazuredeploy.json)
+
 This repo contains an [Azure Resource Manager (ARM) template][armtemplate] that can be used to deploy a Linux [self-hosted build agent][selfhostedagent] for [Azure DevOps][azdo].
 
 The templates are defined as Bicep files, then build into a single ARM template that can be deployed to Azure.
