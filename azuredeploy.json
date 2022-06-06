@@ -1,0 +1,1291 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.6.18.56646",
+      "templateHash": "1995706263067472632"
+    }
+  },
+  "parameters": {
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "vstsbuild",
+      "metadata": {
+        "description": "Admin username for the Virtual Machine."
+      }
+    },
+    "sshPublicKey": {
+      "type": "secureString",
+      "metadata": {
+        "description": "The public key of the SSH key used to sign in to the VM as the admin user."
+      }
+    },
+    "azureDevOpsUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "The Azure DevOps Organisation URL to associate this build agent to."
+      }
+    },
+    "personalAccessToken": {
+      "type": "secureString",
+      "metadata": {
+        "description": "The Personal Access Token (PAT) needed to register a build agent with Azure DevOps"
+      }
+    },
+    "addressSpace": {
+      "type": "string",
+      "defaultValue": "10.0.0.0/24",
+      "metadata": {
+        "description": "Address space for the virtual network. This should be in CIDR format with a /24 range."
+      }
+    },
+    "managementIP": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "IP address from which to allow SSH access to the VM subnet (optional)."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "The location for the resources"
+      }
+    }
+  },
+  "variables": {
+    "prefix": "[take(uniqueString(resourceGroup().id), 4)]",
+    "vnetname": "[format('{0}-build-vnet', variables('prefix'))]",
+    "kvname": "[format('{0}-build-kv', variables('prefix'))]",
+    "vmname": "buildvm1",
+    "acrname": "[format('{0}devacr', variables('prefix'))]",
+    "msiname": "[format('{0}-buildagent-msi', variables('prefix'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2018-11-30",
+      "name": "[variables('msiname')]",
+      "location": "[parameters('location')]"
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2020-10-01",
+      "name": "network",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "vnetName": {
+            "value": "[variables('vnetname')]"
+          },
+          "addressSpace": {
+            "value": "[parameters('addressSpace')]"
+          },
+          "managementIP": {
+            "value": "[parameters('managementIP')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.6.18.56646",
+              "templateHash": "16236053233138393605"
+            }
+          },
+          "parameters": {
+            "vnetName": {
+              "type": "string"
+            },
+            "addressSpace": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]",
+              "metadata": {
+                "description": "The location for the resources"
+              }
+            },
+            "managementIP": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "IP address from which to allow SSH access to the VM subnet."
+              }
+            }
+          },
+          "variables": {
+            "addressSpaceList": "[split(parameters('addressSpace'), ',')]",
+            "cidrParts": "[split(variables('addressSpaceList')[0], '/')]",
+            "addressSpaceParts": "[split(variables('cidrParts')[0], '.')]",
+            "addressPrefix24": "[format('{0}.{1}.{2}', variables('addressSpaceParts')[0], variables('addressSpaceParts')[1], variables('addressSpaceParts')[2])]",
+            "vmsubnetName": "buildagents",
+            "sshRule": {
+              "name": "Allow-SSH",
+              "properties": {
+                "priority": 100,
+                "description": "Allow SSH from fixed location",
+                "access": "Allow",
+                "direction": "Inbound",
+                "sourceAddressPrefix": "[parameters('managementIP')]",
+                "sourcePortRange": "*",
+                "destinationAddressPrefix": "*",
+                "destinationPortRange": "22",
+                "protocol": "Tcp"
+              }
+            },
+            "sshNatPool": {
+              "name": "ssh",
+              "properties": {
+                "backendPort": 22,
+                "frontendPortRangeStart": 22001,
+                "frontendPortRangeEnd": 22099,
+                "frontendIPConfiguration": {
+                  "id": "[resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations', 'lb-vms', 'public-ip')]"
+                },
+                "backendAddressPool": {
+                  "id": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools', 'lb-vms', 'buildvms')]"
+                },
+                "protocol": "Tcp"
+              }
+            },
+            "privatednszones": [
+              "[format('privatelink.blob.{0}', environment().suffixes.storage)]",
+              "privatelink.vaultcore.azure.net",
+              "privatelink.azurecr.io"
+            ]
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2021-08-01",
+              "name": "default-nsg",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": []
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2021-08-01",
+              "name": "agent-nsg",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": "[if(empty(parameters('managementIP')), createArray(), createArray(variables('sshRule')))]"
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2021-08-01",
+              "name": "bastion-nsg",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "Allow-SecureWeb",
+                    "properties": {
+                      "priority": 100,
+                      "description": "Allow HTTPS traffic from the Internet to the Azure Bastion",
+                      "access": "Allow",
+                      "direction": "Inbound",
+                      "sourceAddressPrefix": "Internet",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "*",
+                      "destinationPortRange": "80",
+                      "protocol": "Tcp"
+                    }
+                  },
+                  {
+                    "name": "Allow-ControlPlane",
+                    "properties": {
+                      "priority": 110,
+                      "description": "Allow Azure control-plane access to Azure Bastion",
+                      "access": "Allow",
+                      "direction": "Inbound",
+                      "sourceAddressPrefix": "GatewayManager",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "*",
+                      "destinationPortRange": "443",
+                      "protocol": "Tcp"
+                    }
+                  },
+                  {
+                    "name": "Allow-DataPlane-In",
+                    "properties": {
+                      "priority": 120,
+                      "description": "Allow Azure control-plane access to Azure Bastion",
+                      "access": "Allow",
+                      "direction": "Inbound",
+                      "sourceAddressPrefix": "VirtualNetwork",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "VirtualNetwork",
+                      "destinationPortRanges": [
+                        "8080",
+                        "5701"
+                      ],
+                      "protocol": "*"
+                    }
+                  },
+                  {
+                    "name": "Allow-LoadBalancerProbe",
+                    "properties": {
+                      "priority": 130,
+                      "description": "Allow HTTPS traffic from the LB to the Azure Bastion",
+                      "access": "Allow",
+                      "direction": "Inbound",
+                      "sourceAddressPrefix": "AzureLoadBalancer",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "*",
+                      "destinationPortRange": "80",
+                      "protocol": "Tcp"
+                    }
+                  },
+                  {
+                    "name": "Allow-SSHRDPOut",
+                    "properties": {
+                      "priority": 100,
+                      "description": "Allow Basition access to VMs",
+                      "access": "Allow",
+                      "direction": "Outbound",
+                      "sourceAddressPrefix": "*",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "VirtualNetwork",
+                      "destinationPortRanges": [
+                        "22",
+                        "3380"
+                      ],
+                      "protocol": "*"
+                    }
+                  },
+                  {
+                    "name": "Allow-DataPlane-Out",
+                    "properties": {
+                      "priority": 110,
+                      "description": "Allow Azure control-plane access from Azure Bastion",
+                      "access": "Allow",
+                      "direction": "Outbound",
+                      "sourceAddressPrefix": "VirtualNetwork",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "VirtualNetwork",
+                      "destinationPortRanges": [
+                        "8080",
+                        "5701"
+                      ],
+                      "protocol": "*"
+                    }
+                  },
+                  {
+                    "name": "Allow-Azure-Out",
+                    "properties": {
+                      "priority": 120,
+                      "description": "Allow Bastion access to Azure public endpoints",
+                      "access": "Allow",
+                      "direction": "Outbound",
+                      "sourceAddressPrefix": "*",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "AzureCloud",
+                      "destinationPortRange": "443",
+                      "protocol": "Tcp"
+                    }
+                  },
+                  {
+                    "name": "Allow-Session-Out",
+                    "properties": {
+                      "priority": 130,
+                      "description": "Allow Bastion access to certificate validation",
+                      "access": "Allow",
+                      "direction": "Outbound",
+                      "sourceAddressPrefix": "*",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "Internet",
+                      "destinationPortRange": "80",
+                      "protocol": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/virtualNetworks",
+              "apiVersion": "2021-08-01",
+              "name": "[parameters('vnetName')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "addressSpace": {
+                  "addressPrefixes": "[variables('addressSpaceList')]"
+                },
+                "subnets": [
+                  {
+                    "name": "[variables('vmsubnetName')]",
+                    "properties": {
+                      "addressPrefix": "[format('{0}.0/26', variables('addressPrefix24'))]",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', 'agent-nsg')]"
+                      }
+                    }
+                  },
+                  {
+                    "name": "bastion",
+                    "properties": {
+                      "addressPrefix": "[format('{0}.64/26', variables('addressPrefix24'))]",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', 'bastion-nsg')]"
+                      }
+                    }
+                  },
+                  {
+                    "name": "PrivateEndpoints",
+                    "properties": {
+                      "addressPrefix": "[format('{0}.192/26', variables('addressPrefix24'))]",
+                      "privateEndpointNetworkPolicies": "Disabled",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', 'default-nsg')]"
+                      }
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkSecurityGroups', 'agent-nsg')]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', 'bastion-nsg')]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', 'default-nsg')]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "privatedns",
+                "count": "[length(variables('privatednszones'))]"
+              },
+              "type": "Microsoft.Network/privateDnsZones",
+              "apiVersion": "2020-06-01",
+              "name": "[variables('privatednszones')[copyIndex()]]",
+              "location": "global",
+              "properties": {}
+            },
+            {
+              "copy": {
+                "name": "privatednslinks",
+                "count": "[length(variables('privatednszones'))]"
+              },
+              "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+              "apiVersion": "2020-06-01",
+              "name": "[format('{0}/{1}', variables('privatednszones')[copyIndex()], uniqueString(resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))))]",
+              "location": "global",
+              "properties": {
+                "virtualNetwork": {
+                  "id": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+                },
+                "registrationEnabled": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]",
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('privatednszones')[copyIndex()])]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2021-08-01",
+              "name": "pip-loadbalancer",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+              },
+              "properties": {
+                "publicIPAllocationMethod": "Static"
+              }
+            },
+            {
+              "type": "Microsoft.Network/loadBalancers",
+              "apiVersion": "2021-08-01",
+              "name": "lb-vms",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+              },
+              "properties": {
+                "frontendIPConfigurations": [
+                  {
+                    "name": "public-ip",
+                    "properties": {
+                      "publicIPAddress": {
+                        "id": "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-loadbalancer')]"
+                      }
+                    }
+                  }
+                ],
+                "backendAddressPools": [
+                  {
+                    "name": "buildvms"
+                  }
+                ],
+                "outboundRules": [
+                  {
+                    "name": "defaultout",
+                    "properties": {
+                      "frontendIPConfigurations": [
+                        {
+                          "id": "[resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations', 'lb-vms', 'public-ip')]"
+                        }
+                      ],
+                      "backendAddressPool": {
+                        "id": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools', 'lb-vms', 'buildvms')]"
+                      },
+                      "protocol": "All"
+                    }
+                  }
+                ],
+                "inboundNatRules": "[if(empty(parameters('managementIP')), createArray(), createArray(variables('sshNatPool')))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-loadbalancer')]"
+              ]
+            }
+          ],
+          "outputs": {
+            "vmsubnet": {
+              "type": "string",
+              "value": "[variables('vmsubnetName')]"
+            },
+            "pesubnetid": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))).subnets[2].id]"
+            },
+            "lbBePoolId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/loadBalancers', 'lb-vms')).backendAddressPools[0].id]"
+            },
+            "blobdnszoneid": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateDnsZones', variables('privatednszones')[0])]"
+            },
+            "kvdnszoneid": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateDnsZones', variables('privatednszones')[1])]"
+            },
+            "crdnszoneid": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateDnsZones', variables('privatednszones')[2])]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2020-10-01",
+      "name": "keyvault",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "keyvaultname": {
+            "value": "[variables('kvname')]"
+          },
+          "pattoken": {
+            "value": "[parameters('personalAccessToken')]"
+          },
+          "privatednszoneid": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.kvdnszoneid.value]"
+          },
+          "subnetid": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.pesubnetid.value]"
+          },
+          "servicePrincipalObjectId": {
+            "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('msiname'))).principalId]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.6.18.56646",
+              "templateHash": "9073718954849158263"
+            }
+          },
+          "parameters": {
+            "keyvaultname": {
+              "type": "string",
+              "metadata": {
+                "description": "The name of the keyvault"
+              }
+            },
+            "pattoken": {
+              "type": "secureString",
+              "metadata": {
+                "description": "The PAT token needed to register a build agent with Azure DevOps"
+              }
+            },
+            "subnetid": {
+              "type": "string"
+            },
+            "privatednszoneid": {
+              "type": "string"
+            },
+            "servicePrincipalObjectId": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.KeyVault/vaults/secrets",
+              "apiVersion": "2019-09-01",
+              "name": "[format('{0}/{1}', parameters('keyvaultname'), 'DevOpsPAT')]",
+              "properties": {
+                "value": "[parameters('pattoken')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyvaultname'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2021-02-01",
+              "name": "[format('{0}/{1}', format('pe-{0}', parameters('keyvaultname')), 'default')]",
+              "properties": {
+                "privateDnsZoneConfigs": [
+                  {
+                    "name": "config",
+                    "properties": {
+                      "privateDnsZoneId": "[parameters('privatednszoneid')]"
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}', parameters('keyvaultname')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.KeyVault/vaults",
+              "apiVersion": "2019-09-01",
+              "name": "[parameters('keyvaultname')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "sku": {
+                  "family": "A",
+                  "name": "premium"
+                },
+                "tenantId": "[subscription().tenantId]",
+                "enabledForDeployment": false,
+                "enabledForDiskEncryption": false,
+                "enabledForTemplateDeployment": false,
+                "enableSoftDelete": true,
+                "softDeleteRetentionInDays": 7,
+                "networkAcls": {
+                  "bypass": "None",
+                  "defaultAction": "Deny",
+                  "ipRules": []
+                },
+                "accessPolicies": [
+                  {
+                    "tenantId": "[subscription().tenantId]",
+                    "objectId": "[parameters('servicePrincipalObjectId')]",
+                    "permissions": {
+                      "secrets": [
+                        "get"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2021-02-01",
+              "name": "[format('pe-{0}', parameters('keyvaultname'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "subnet": {
+                  "id": "[parameters('subnetid')]"
+                },
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "KeyVault",
+                    "properties": {
+                      "privateLinkServiceId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyvaultname'))]",
+                      "groupIds": [
+                        "vault"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyvaultname'))]"
+              ]
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('msiname'))]",
+        "[resourceId('Microsoft.Resources/deployments', 'network')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2020-10-01",
+      "name": "tfstatestorage",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "stgaccountname": {
+            "value": "[format('{0}tfstate', variables('prefix'))]"
+          },
+          "privatednszoneid": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.blobdnszoneid.value]"
+          },
+          "subnetid": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.pesubnetid.value]"
+          },
+          "buildAgentServicePrincipalObjectId": {
+            "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('msiname'))).principalId]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.6.18.56646",
+              "templateHash": "9095244110652158070"
+            }
+          },
+          "parameters": {
+            "stgaccountname": {
+              "type": "string"
+            },
+            "subnetid": {
+              "type": "string"
+            },
+            "privatednszoneid": {
+              "type": "string"
+            },
+            "buildAgentServicePrincipalObjectId": {
+              "type": "string",
+              "defaultValue": ""
+            },
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]",
+              "metadata": {
+                "description": "The location for the resources"
+              }
+            }
+          },
+          "variables": {
+            "storageBlobDataContributorId": "[resourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2021-09-01",
+              "name": "[format('{0}/{1}/{2}', parameters('stgaccountname'), 'default', 'tfstate')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('stgaccountname'), 'default')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2021-09-01",
+              "name": "[format('{0}/{1}/{2}', parameters('stgaccountname'), 'default', 'build')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('stgaccountname'), 'default')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices",
+              "apiVersion": "2021-09-01",
+              "name": "[format('{0}/{1}', parameters('stgaccountname'), 'default')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgaccountname'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2021-08-01",
+              "name": "[format('{0}/{1}', format('pe-{0}', parameters('stgaccountname')), 'default')]",
+              "properties": {
+                "privateDnsZoneConfigs": [
+                  {
+                    "name": "config",
+                    "properties": {
+                      "privateDnsZoneId": "[parameters('privatednszoneid')]"
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}', parameters('stgaccountname')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2021-09-01",
+              "name": "[parameters('stgaccountname')]",
+              "location": "[parameters('location')]",
+              "kind": "StorageV2",
+              "sku": {
+                "name": "Standard_LRS"
+              },
+              "properties": {
+                "accessTier": "Hot",
+                "allowBlobPublicAccess": false,
+                "allowSharedKeyAccess": true,
+                "supportsHttpsTrafficOnly": true,
+                "networkAcls": {
+                  "bypass": "AzureServices",
+                  "defaultAction": "Deny",
+                  "ipRules": [],
+                  "virtualNetworkRules": []
+                }
+              }
+            },
+            {
+              "condition": "[greater(length(parameters('buildAgentServicePrincipalObjectId')), 0)]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2020-10-01-preview",
+              "scope": "[format('Microsoft.Storage/storageAccounts/{0}', parameters('stgaccountname'))]",
+              "name": "[guid(variables('storageBlobDataContributorId'), parameters('buildAgentServicePrincipalObjectId'), resourceId('Microsoft.Storage/storageAccounts', parameters('stgaccountname')))]",
+              "properties": {
+                "roleDefinitionId": "[variables('storageBlobDataContributorId')]",
+                "principalId": "[parameters('buildAgentServicePrincipalObjectId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgaccountname'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2021-08-01",
+              "name": "[format('pe-{0}', parameters('stgaccountname'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "subnet": {
+                  "id": "[parameters('subnetid')]"
+                },
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "KeyVault",
+                    "properties": {
+                      "privateLinkServiceId": "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgaccountname'))]",
+                      "groupIds": [
+                        "Blob"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('stgaccountname'))]"
+              ]
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('msiname'))]",
+        "[resourceId('Microsoft.Resources/deployments', 'network')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2020-10-01",
+      "name": "devContainerRegistry",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "name": {
+            "value": "[variables('acrname')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "subnetid": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.pesubnetid.value]"
+          },
+          "privatednszoneid": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.crdnszoneid.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.6.18.56646",
+              "templateHash": "13567468639014864644"
+            }
+          },
+          "parameters": {
+            "name": {
+              "type": "string"
+            },
+            "subnetid": {
+              "type": "string"
+            },
+            "privatednszoneid": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2021-08-01",
+              "name": "[format('{0}/{1}', format('pe-{0}', parameters('name')), 'default')]",
+              "properties": {
+                "privateDnsZoneConfigs": [
+                  {
+                    "name": "config",
+                    "properties": {
+                      "privateDnsZoneId": "[parameters('privatednszoneid')]"
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}', parameters('name')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ContainerRegistry/registries",
+              "apiVersion": "2021-12-01-preview",
+              "name": "[parameters('name')]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Premium"
+              },
+              "properties": {
+                "adminUserEnabled": true,
+                "dataEndpointEnabled": true,
+                "anonymousPullEnabled": false,
+                "networkRuleSet": {
+                  "defaultAction": "Deny",
+                  "ipRules": [],
+                  "virtualNetworkRules": []
+                },
+                "networkRuleBypassOptions": "None",
+                "publicNetworkAccess": "Disabled"
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2021-08-01",
+              "name": "[format('pe-{0}', parameters('name'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "subnet": {
+                  "id": "[parameters('subnetid')]"
+                },
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "ContainerRegistry",
+                    "properties": {
+                      "privateLinkServiceId": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('name'))]",
+                      "groupIds": [
+                        "registry"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerRegistry/registries', parameters('name'))]"
+              ]
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'network')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2020-10-01",
+      "name": "buildvm",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "adminUsername": {
+            "value": "[parameters('adminUsername')]"
+          },
+          "agentPool": {
+            "value": "Default"
+          },
+          "devOpsServer": {
+            "value": "[parameters('azureDevOpsUrl')]"
+          },
+          "keyVaultName": {
+            "value": "[variables('kvname')]"
+          },
+          "subNetName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.vmsubnet.value]"
+          },
+          "vNetName": {
+            "value": "[variables('vnetname')]"
+          },
+          "vNetResourceGroup": {
+            "value": "[resourceGroup().name]"
+          },
+          "vmName": {
+            "value": "[variables('vmname')]"
+          },
+          "sshPublicKey": {
+            "value": "[parameters('sshPublicKey')]"
+          },
+          "lbBePoolId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network')).outputs.lbBePoolId.value]"
+          },
+          "msiResourceGroup": {
+            "value": "[resourceGroup().name]"
+          },
+          "msiName": {
+            "value": "[variables('msiname')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.6.18.56646",
+              "templateHash": "2761644910330043351"
+            }
+          },
+          "parameters": {
+            "vmName": {
+              "type": "string",
+              "metadata": {
+                "description": "The machine name to use for the VM."
+              }
+            },
+            "vNetName": {
+              "type": "string",
+              "metadata": {
+                "description": "The name of the virtual network."
+              }
+            },
+            "subNetName": {
+              "type": "string",
+              "metadata": {
+                "description": "The name of the subnet to deploy the server into."
+              }
+            },
+            "vNetResourceGroup": {
+              "type": "string",
+              "metadata": {
+                "description": "The virtual network resource group."
+              }
+            },
+            "instanceSize": {
+              "type": "string",
+              "defaultValue": "Standard_D2ds_v4",
+              "metadata": {
+                "description": "The VM size to deploy."
+              }
+            },
+            "adminUsername": {
+              "type": "string",
+              "defaultValue": "vstsbuild",
+              "metadata": {
+                "description": "Admin username for the Virtual Machine."
+              }
+            },
+            "sshPublicKey": {
+              "type": "string",
+              "metadata": {
+                "description": "The SSH public key for the admin account."
+              }
+            },
+            "devOpsServer": {
+              "type": "string",
+              "metadata": {
+                "description": "The url of the Azure DevOps tenant, e.g. https://dev.azure.com/mydevops"
+              }
+            },
+            "keyVaultName": {
+              "type": "string",
+              "metadata": {
+                "description": "The name of the KeyVault that has the Azure DevOps PAT stored as a secret."
+              }
+            },
+            "patTokenSecretName": {
+              "type": "string",
+              "defaultValue": "DevOpsPAT",
+              "metadata": {
+                "description": "The name of the secret in KeyVault containing the Azure DevOps PAT."
+              }
+            },
+            "agentPool": {
+              "type": "string",
+              "defaultValue": "Default",
+              "metadata": {
+                "description": "The name of the Agent Pool to register the agent in."
+              }
+            },
+            "dataDiskSize": {
+              "type": "int",
+              "defaultValue": 256,
+              "allowedValues": [
+                64,
+                128,
+                256,
+                512,
+                1024
+              ],
+              "metadata": {
+                "description": "The size of the data disk provisioned for storing Docker images"
+              }
+            },
+            "lbBePoolId": {
+              "type": "string",
+              "metadata": {
+                "description": "The resource id of the backend pool on the load balancer."
+              }
+            },
+            "msiResourceGroup": {
+              "type": "string",
+              "metadata": {
+                "description": "The resource group the user assigned managed identity is in."
+              }
+            },
+            "msiName": {
+              "type": "string",
+              "metadata": {
+                "description": "The name of the user assigned managed identity."
+              }
+            },
+            "location": {
+              "type": "string",
+              "defaultValue": "[resourceGroup().location]",
+              "metadata": {
+                "description": "The location for the resources"
+              }
+            }
+          },
+          "variables": {
+            "prefix": "[take(uniqueString(resourceGroup().id), 4)]",
+            "prefixedVMName": "[format('{0}-{1}', variables('prefix'), toLower(parameters('vmName')))]",
+            "nicName": "[format('{0}-nic', variables('prefixedVMName'))]",
+            "dataDiskName": "[format('{0}-data', variables('prefixedVMName'))]",
+            "diagnosticsStorageAccountName": "[format('{0}diagnostics{1}', variables('prefix'), take(uniqueString(resourceId('Microsoft.Compute/virtualMachines', variables('prefixedVMName'))), 4))]",
+            "cloudInit": "I2Nsb3VkLWNvbmZpZwoKdGltZXpvbmU6IEV1cm9wZS9Mb25kb24KCmRpc2tfc2V0dXA6CiAgL2Rldi9kaXNrL2F6dXJlL3Njc2kxL2x1bjA6CiAgICB0YWJsZV90eXBlOiBncHQKICAgIGxheW91dDogdHJ1ZQogICAgb3ZlcndyaXRlOiB0cnVlCgpmc19zZXR1cDoKLSBkZXZpY2U6IC9kZXYvZGlzay9henVyZS9zY3NpMS9sdW4wCiAgcGFydGl0aW9uOiAxCiAgZmlsZXN5c3RlbTogZXh0NAoKbW91bnRzOgotIFsKICAgICIvZGV2L2Rpc2svYXp1cmUvc2NzaTEvbHVuMC1wYXJ0MSIsCiAgICAiL29wdC9kYXRhIiwKICAgICJhdXRvIiwKICAgICJkZWZhdWx0cyxub2V4ZWMsbm9mYWlsIgogIF0KCmFwdDoKICBzb3VyY2VzOgogICAgbWljcm9zb2Z0OgogICAgICBrZXlpZDogRUIzRTk0QURCRTEyMjlDRgogICAgICBzb3VyY2U6ICJkZWIgW2FyY2g9YW1kNjRdIGh0dHBzOi8vcGFja2FnZXMubWljcm9zb2Z0LmNvbS91YnVudHUvMjAuMDQvcHJvZC8gZm9jYWwgbWFpbiIKICAgIGF6dXJlLWNsaToKICAgICAga2V5aWQ6IEVCM0U5NEFEQkUxMjI5Q0YKICAgICAgc291cmNlOiAiZGViIFthcmNoPWFtZDY0XSBodHRwczovL3BhY2thZ2VzLm1pY3Jvc29mdC5jb20vcmVwb3MvYXp1cmUtY2xpLyBmb2NhbCBtYWluIgogICAgZG9ja2VyOgogICAgICBrZXlpZDogOEQ4MTgwM0MwRUJGQ0Q4OAogICAgICBzb3VyY2U6ICJkZWIgW2FyY2g9YW1kNjRdIGh0dHBzOi8vZG93bmxvYWQuZG9ja2VyLmNvbS9saW51eC91YnVudHUgZm9jYWwgc3RhYmxlIgogICAga3ViZXJuZXRlczoKICAgICAga2V5aWQ6IEZFRUE5MTY5MzA3RUEwNzEKICAgICAgc291cmNlOiAiZGViIFthcmNoPWFtZDY0XSBodHRwczovL2FwdC5rdWJlcm5ldGVzLmlvLyBrdWJlcm5ldGVzLXhlbmlhbCBtYWluIgogICAgbm9kZToKICAgICAga2V5aWQ6IDE2NTVBMEFCNjg1NzYyODAKICAgICAgc291cmNlOiAiZGViIFthcmNoPWFtZDY0XSBodHRwczovL2RlYi5ub2Rlc291cmNlLmNvbS9ub2RlXzE0LnggZm9jYWwgbWFpbiIKICAgIHlhcm46CiAgICAgIGtleWlkOiAxNjQ2QjAxQjg2RTUwMzEwCiAgICAgIHNvdXJjZTogImRlYiBbYXJjaD1hbWQ2NF0gaHR0cHM6Ly9kbC55YXJucGtnLmNvbS9kZWJpYW4gc3RhYmxlIG1haW4iCiAgICBoYXNoaWNvcnA6CiAgICAgIGtleWlkOiBEQTQxOEM4OEEzMjE5RjdCCiAgICAgIHNvdXJjZTogImRlYiBbYXJjaD1hbWQ2NF0gaHR0cHM6Ly9hcHQucmVsZWFzZXMuaGFzaGljb3JwLmNvbSBmb2NhbCBtYWluIgogICAgaGVsbToKICAgICAga2V5aWQ6IDI5NEFDNDgyN0MxQTE2OEEKICAgICAgc291cmNlOiAiZGViIGh0dHBzOi8vYmFsdG9jZG4uY29tL2hlbG0vc3RhYmxlL2RlYmlhbi8gYWxsIG1haW4iCgpwYWNrYWdlczoKLSBhcHQtdHJhbnNwb3J0LWh0dHBzCi0gYXp1cmUtY2xpCi0gYmludXRpbHMKLSBjYS1jZXJ0aWZpY2F0ZXMKLSBjb250YWluZXJkLmlvCi0gY3VybAotIGRvY2tlci1jZQotIGRvY2tlci1jZS1jbGkKLSBkb3RuZXQtc2RrLTMuMQotIGRvdG5ldC1zZGstNS4wCi0gZG90bmV0LXNkay02LjAKLSBnbnVwZwotIGdudXBnLWFnZW50Ci0gaGVsbQotIGpxCi0ga3ViZWN0bAotIGxpYmF1Z2VhczAKLSBsc2ItcmVsZWFzZQotIG5vZGVqcwotIHBvd2Vyc2hlbGwKLSBweXRob24zCi0gcHl0aG9uMy1waXAKLSBweXRob24zLXZlbnYKLSBzb2Z0d2FyZS1wcm9wZXJ0aWVzLWNvbW1vbgotIHRlcnJhZm9ybQotIHVuemlwCi0geWFybgotIHppcAoKcGFja2FnZV91cGRhdGU6IHRydWUKcGFja2FnZV91cGdyYWRlOiB0cnVlCnBhY2thZ2VfcmVib290X2lmX3JlcXVpcmVkOiBmYWxzZQoKd3JpdGVfZmlsZXM6Ci0gZW5jb2Rpbmc6IGd6aXAKICBjb250ZW50OiAhIWJpbmFyeSB8CiAgICBINHNJQUFBQUFBQUFBNVZYNjFQYlJoRC9ycjlpcXpnWVR5ckpPR21hbXBpTVUwamlhU0FNaFh3aERIT1d6dmJGNGs2NU84azhtdnp0M1QwOS9BQW03UXd6c2xiNzN0OCtlUEpMTkJZeUdqTXo4N3pjc0NuZjdzQWQ4SGltd0Qrajl6NFV4dElQYVVNemc4REFhM2FiYTU3d1FtWEdjRjF3dlFmQkhGN1ArYzFubHFjVzN5eThQaDZlV2pYbkV0OFlpcEM4WkZkOEQ4NkRySHJQbEVyM0xuelkyZHZxN1FLL0ZoWjJkdUc3NXlVOFRwbm1VR29mK0g1RHlaaDFXbGRwamU1N1JESXc4UGY1aE56YStEYlZLczhHL2pnWGFlSUlab01oTjJTNkNYNzU5WjRER0hoQkZsWnBoZVJXSkd1dTUrTlV4SmNpSTZMM0JFWlNXTUZTY1V0UmFYVGZjbTNBWkR3V0U4RVRtR2gxQmJHNnVtSXlnVlJJN2kxbUl1VXc1VlpsMW9EZk4vMTUzL1paUCtzWGZSK1ludTVDb2p5QW1Ca09mdXNPS2Q5OUVCSkpBS2JqSGxBbnRYWDM2ZmgwZVBMK3V5UHY3cnJIdkdacVFucVF6ZFpzVFRrZVpHTTEyN0pDRC9KbGEzeXVhQS95RlRWZmxkd0htTGhoc1pjb1RKWW5KbkIrRHNFdFpxSU0yWWVMaTEyd00wNEpLUkYrcEdCSVlJWjlYbnpLRFB6dEdPSHM1R05WQ0o3NHhFelE3SG9UNFhtR1d3Z0tqMTluU2x2WVAzZzdHaDVkdmp2NWRIUjZjTFEva0VvS2lYVmtzUlVGOTFobUF5d1g1Rm5DN1BKVlNHTlpta0p3QTBTeW1rbEQ2b0tadGVoRWFzYUI1aW1uS2s1bG5rMGh6blhxTEQ4ckNEbnY4UmVUd09LWUcxUENFU1pLdzE5VkEwSnVoSnhTcFBENUVCQS9tTmNFUk1JUmNUZGVWYkJ0VWdwdE10bVBvcDJYZjRTOTMxNkUxVE5DTkRMMG1VVWtaVkVzVWl5M3MxN2twTit3VEFTWUtDT1VIUFM2TzYrQ2JpL283bXhwYmxTdVl6NXdnVHg5UG56YWU0ZC9Ea21obXhvaFZxNE53UWM0ckF6MHJjNDVUWlYvNE9zM0NEUzB3ekt1UzJlcDNXa0tLYkdRanJaV3h5VUN5NEI4WnhvamF0VVFEamZNUjRiSG1sc1R0V3JadFhCK0Q3cytPVGpFY0pVV3Q4d2l0ZSsvNWRqREdtb1AxaHd1V0pwejlKVHdzWUs2V3YwRHVEc3VxMXRpN01aVmFnMkhPRHpMdWpibzI5blUzdlRVejlVeklENEhFYkpVamJNSEZQdXRnN1BSUGtZbk9YVHZxejFGWVJOcmtWbVFuQ2NFUFJoejBEbGkwWUJXeW9aaHVLRVk4WTdXd0UxYmFDMG5MK3hCaENza2tubWFPdXZRZWxQYmJjdzZUcFlrcTRLcldqTm16S0wrU3ZQNlAya2xSbElhWEVFd1hmTXBlSThETko1VG5SdVZ6dDRUT0dSejdySlhNUmg2WUJzV1RLUnNuTkpXY0ovZFBpbFRqTU9jYU14V01vR1FRU1c5RU5qK0M2WG5vWWVaWFVpWHZQNnFLMUhCZElTWmpVcUprT3g1M2l6Ulp1QVBzVUV5SFB4WmhndkY0VE1xWkJKT2haM2w0N0I0L3V5clVZZ2NUQTdDSEp1aTdvMjZOUkR1TlRQdWwwanpUSm5vVU1SYUdUV3hrZXVVSUJNWnA2MWpBdWRWVkUwa0U2VTR5b3lsRm1tUk94dTk2MnllWHlESm9FQnN0ME9IdmNFQS9QSmI2SnpySUVNNDFtcUJHYjVNTUFPcFlza2xPb2x0VkwvV2JyZWFRQ0Q0dUc1dXpWQ0duaUhHcjV3eGREMi9EcTVmdm5DbTFuekJWOHUwTlF0TXdiWmI4R1dJZnFmam1qamw1VEVSemRRVmo1WklpRnJicmc5YXRZTXJqcEJFdTRNNUorYjZlNW42UjJWcTBwbUwyak01QkRINFZjZ2JlaWpzQU5YVTN2bXJDRzFFRS9nQlcxdUEwZUdNdUo0czJZbUtpWGxFL0Y2Z2RCSldTeXJoR1plNEEyTEJUVWhIWW1YTFJkWCtmSFJ3T3RvZnRNcUYzSWE5UGZnUmhWd1c2d2JLbFVYdG9YSTdWamtlTk9VMUJLUGpYd0g3TkZaeUlxWjBWWWJWS0twcVQyRi9nUGJhdHNEOXNRRC82UjNCK1RKV0NjY2p4Ly9aSHFNOGpsbktaTXoxeHZycTdaVHJ5NmNNTitPakF3SC9CcjN1Mmh4YzNuQkwveDR4M1gvVi9iL1c3d2U2Qk11cWhyRE80a21lY3JPRU41TTNuZlB1UllpWEl4NGhNaGxsd3lUQm5XemFkRGcxYTdUVlJMRWFHaDZHcTVVOVBudjdjZlRuNWVoNHNHUi9yTDRBT0NQZGNZUWFVcWZrSHFUS0Nydi9JSUpjNG1Za1ZPRU1EcGdiWnFlY0grUXBvNCtZMVMvMXlmYkZKdzdjeEc0akJrRjU2M3haN2xiSFFCY2pFWnZ6c1JTanQ0Wk1xSGRrbkhZcGl6YzZBRHZubnNkZUdKa2lKby9yZTIxRm92bm1SZ25KQi84Q1RENUowVXNOQUFBPQogIG93bmVyOiByb290OnJvb3QKICBwYXRoOiAvcm9vdC92c3RzYWdlbnQuc2gKICBwZXJtaXNzaW9uczogJzA3NDQnCgotIHBhdGg6IC9ldGMvcHJvZmlsZS5kL2Nsb3VkaW5pdC5zaAogIGNvbnRlbnQ6IHwKICAgIGV4cG9ydCBQQVRIPSRQQVRIOi91c3IvbG9jYWwvZ28vYmluCiAgb3duZXI6IHJvb3Q6cm9vdAogIHBlcm1pc3Npb25zOiAnMDY0NCcKCi0gcGF0aDogL2V0Yy9kb2NrZXIvZGFlbW9uLmpzb24KICBjb250ZW50OiB8CiAgICB7CiAgICAgICJkYXRhLXJvb3QiOiAiL29wdC9kYXRhL2RvY2tlciIKICAgIH0KICBvd25lcjogcm9vdDpyb290CiAgcGVybWlzc2lvbnM6ICcwNjQ0JwoKcnVuY21kOgotIFsgbWtkaXIsIC1wLCAvcm9vdC9kb3dubG9hZHMgXQotIHwKICBnb2xhbmd2ZXI9JChjdXJsIC1zIGh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9nb2xhbmcvZ28vcmVsZWFzZS1icmFuY2guZ28xLjE2L1ZFUlNJT04pCiAgY3VybCAtc0wgImh0dHBzOi8vZ29sYW5nLm9yZy9kbC8kZ29sYW5ndmVyLmxpbnV4LWFtZDY0LnRhci5neiIgLW8gIi9yb290L2Rvd25sb2Fkcy8kZ29sYW5ndmVyLmxpbnV4LWFtZDY0LnRhci5neiIKICB0YXIgLUMgL3Vzci9sb2NhbCAteHpmICIvcm9vdC9kb3dubG9hZHMvJGdvbGFuZ3Zlci5saW51eC1hbWQ2NC50YXIuZ3oiCi0gfAogIGF6Y29weXRhcj0kKGN1cmwgLXNJIGh0dHBzOi8vYWthLm1zL2Rvd25sb2FkYXpjb3B5LXYxMC1saW51eCB8IGdyZXAgLW9FICdhemNvcHlfbGludXhfYW1kNjRfLipneicpCiAgYXpjb3B5dmVyPSQoZWNobyAkYXpjb3B5dGFyIHwgZ3JlcCAtb0UgJ1swLTldK1wuWzAtOV0rXC5bMC05XSsnKQogIGN1cmwgLXNMIGh0dHBzOi8vYWthLm1zL2Rvd25sb2FkYXpjb3B5LXYxMC1saW51eCAtbyAvcm9vdC9kb3dubG9hZHMvJGF6Y29weXRhcgogIHRhciAtenhmIC9yb290L2Rvd25sb2Fkcy8kYXpjb3B5dGFyIC1DIC91c3IvbG9jYWwvYmluIC0tc3RyaXAtY29tcG9uZW50cyAxIGF6Y29weV9saW51eF9hbWQ2NF8kYXpjb3B5dmVyL2F6Y29weQogIGNobW9kIDc1NSAvdXNyL2xvY2FsL2Jpbi9hemNvcHkKLSBbIHJtLCAtcmYsIC9yb290L2Rvd25sb2FkcyBdCi0gWyBwd3NoLCAtbm9wLCAtbm9sLCAtbm9uaSwgLUNvbW1hbmQsICJTZXQtUFNSZXBvc2l0b3J5IC1OYW1lICdQU0dhbGxlcnknIC1JbnN0YWxsYXRpb25Qb2xpY3kgVHJ1c3RlZCIgXQotIFsgcHdzaCwgLW5vcCwgLW5vbCwgLW5vbmksIC1Db21tYW5kLCAiSW5zdGFsbC1Nb2R1bGUgLU5hbWUgQXogLVNjb3BlIEFsbFVzZXJzIC1SZXBvc2l0b3J5ICdQU0dhbGxlcnknIC1Gb3JjZSIgXQotIFsgcHdzaCwgLW5vcCwgLW5vbCwgLW5vbmksIC1Db21tYW5kLCAiU2V0LVBTUmVwb3NpdG9yeSAtTmFtZSAnUFNHYWxsZXJ5JyAtSW5zdGFsbGF0aW9uUG9saWN5IFVudHJ1c3RlZCIgXQoKZ3JvdXBzOgotIGRvY2tlcgoKdXNlcnM6Ci0gZGVmYXVsdAo=",
+            "customScriptFormat": "#!/bin/bash\n\ncloud-init status --wait\n\n/root/vstsagent.sh -s \"{0}\" -k \"{1}\" -t \"{2}\" -a \"{3}\" -v \"{4}\" -p \"{5}\"\n\n[ -f /var/run/reboot-required ] && shutdown -r +1 || :\n",
+            "agentName": "[format('{0}-Agent', parameters('vmName'))]",
+            "customScript": "[format(variables('customScriptFormat'), parameters('devOpsServer'), parameters('keyVaultName'), parameters('patTokenSecretName'), variables('agentName'), extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('vNetResourceGroup')), 'Microsoft.Network/virtualNetworks', parameters('vNetName')), parameters('agentPool'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Compute/virtualMachines/extensions",
+              "apiVersion": "2021-11-01",
+              "name": "[format('{0}/{1}', variables('prefixedVMName'), 'CustomScript')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "publisher": "Microsoft.Azure.Extensions",
+                "type": "CustomScript",
+                "typeHandlerVersion": "2.1",
+                "autoUpgradeMinorVersion": true,
+                "protectedSettings": {
+                  "script": "[base64(variables('customScript'))]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Compute/virtualMachines', variables('prefixedVMName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/networkInterfaces",
+              "apiVersion": "2021-08-01",
+              "name": "[variables('nicName')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "ipConfigurations": [
+                  {
+                    "name": "ipconfig",
+                    "properties": {
+                      "privateIPAllocationMethod": "Dynamic",
+                      "subnet": {
+                        "id": "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('vNetResourceGroup')), 'Microsoft.Network/virtualNetworks/subnets', split(format('{0}/{1}', parameters('vNetName'), parameters('subNetName')), '/')[0], split(format('{0}/{1}', parameters('vNetName'), parameters('subNetName')), '/')[1])]"
+                      },
+                      "loadBalancerBackendAddressPools": [
+                        {
+                          "id": "[parameters('lbBePoolId')]"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2021-09-01",
+              "name": "[variables('diagnosticsStorageAccountName')]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard_LRS"
+              },
+              "kind": "StorageV2",
+              "properties": {
+                "accessTier": "Hot",
+                "allowBlobPublicAccess": false,
+                "allowSharedKeyAccess": true,
+                "supportsHttpsTrafficOnly": true
+              }
+            },
+            {
+              "type": "Microsoft.Compute/disks",
+              "apiVersion": "2021-12-01",
+              "name": "[variables('dataDiskName')]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Premium_LRS"
+              },
+              "properties": {
+                "creationData": {
+                  "createOption": "Empty"
+                },
+                "diskSizeGB": "[parameters('dataDiskSize')]"
+              }
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines",
+              "apiVersion": "2021-11-01",
+              "name": "[variables('prefixedVMName')]",
+              "location": "[parameters('location')]",
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                  "[format('{0}', extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('msiResourceGroup')), 'Microsoft.ManagedIdentity/userAssignedIdentities', parameters('msiName')))]": {}
+                }
+              },
+              "properties": {
+                "hardwareProfile": {
+                  "vmSize": "[parameters('instanceSize')]"
+                },
+                "osProfile": {
+                  "computerName": "[toUpper(format('{0}{1}', variables('prefix'), parameters('vmName')))]",
+                  "adminUsername": "[parameters('adminUsername')]",
+                  "linuxConfiguration": {
+                    "disablePasswordAuthentication": true,
+                    "ssh": {
+                      "publicKeys": [
+                        {
+                          "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                          "keyData": "[parameters('sshPublicKey')]"
+                        }
+                      ]
+                    },
+                    "provisionVMAgent": true
+                  },
+                  "customData": "[variables('cloudInit')]",
+                  "allowExtensionOperations": true
+                },
+                "storageProfile": {
+                  "imageReference": {
+                    "publisher": "Canonical",
+                    "offer": "0001-com-ubuntu-server-focal",
+                    "sku": "20_04-lts-gen2",
+                    "version": "latest"
+                  },
+                  "osDisk": {
+                    "diffDiskSettings": {
+                      "option": "Local",
+                      "placement": "ResourceDisk"
+                    },
+                    "caching": "ReadOnly",
+                    "createOption": "FromImage"
+                  },
+                  "dataDisks": [
+                    {
+                      "lun": 0,
+                      "createOption": "Attach",
+                      "caching": "ReadWrite",
+                      "managedDisk": {
+                        "id": "[resourceId('Microsoft.Compute/disks', variables('dataDiskName'))]"
+                      }
+                    }
+                  ]
+                },
+                "networkProfile": {
+                  "networkInterfaces": [
+                    {
+                      "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]",
+                      "properties": {
+                        "primary": true
+                      }
+                    }
+                  ]
+                },
+                "diagnosticsProfile": {
+                  "bootDiagnostics": {
+                    "enabled": true,
+                    "storageUri": "[reference(resourceId('Microsoft.Storage/storageAccounts', variables('diagnosticsStorageAccountName'))).primaryEndpoints.blob]"
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Compute/disks', variables('dataDiskName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('diagnosticsStorageAccountName'))]",
+                "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+              ]
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'keyvault')]",
+        "[resourceId('Microsoft.Resources/deployments', 'network')]"
+      ]
+    }
+  ]
+}

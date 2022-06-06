@@ -1,0 +1,128 @@
+#cloud-config
+
+timezone: Europe/London
+
+disk_setup:
+  /dev/disk/azure/scsi1/lun0:
+    table_type: gpt
+    layout: true
+    overwrite: true
+
+fs_setup:
+- device: /dev/disk/azure/scsi1/lun0
+  partition: 1
+  filesystem: ext4
+
+mounts:
+- [
+    "/dev/disk/azure/scsi1/lun0-part1",
+    "/opt/data",
+    "auto",
+    "defaults,noexec,nofail"
+  ]
+
+apt:
+  sources:
+    microsoft:
+      keyid: EB3E94ADBE1229CF
+      source: "deb [arch=amd64] https://packages.microsoft.com/ubuntu/20.04/prod/ focal main"
+    azure-cli:
+      keyid: EB3E94ADBE1229CF
+      source: "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ focal main"
+    docker:
+      keyid: 8D81803C0EBFCD88
+      source: "deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable"
+    kubernetes:
+      keyid: FEEA9169307EA071
+      source: "deb [arch=amd64] https://apt.kubernetes.io/ kubernetes-xenial main"
+    node:
+      keyid: 1655A0AB68576280
+      source: "deb [arch=amd64] https://deb.nodesource.com/node_14.x focal main"
+    yarn:
+      keyid: 1646B01B86E50310
+      source: "deb [arch=amd64] https://dl.yarnpkg.com/debian stable main"
+    hashicorp:
+      keyid: DA418C88A3219F7B
+      source: "deb [arch=amd64] https://apt.releases.hashicorp.com focal main"
+    helm:
+      keyid: 294AC4827C1A168A
+      source: "deb https://baltocdn.com/helm/stable/debian/ all main"
+
+packages:
+- apt-transport-https
+- azure-cli
+- binutils
+- ca-certificates
+- containerd.io
+- curl
+- docker-ce
+- docker-ce-cli
+- dotnet-sdk-3.1
+- dotnet-sdk-5.0
+- dotnet-sdk-6.0
+- gnupg
+- gnupg-agent
+- helm
+- jq
+- kubectl
+- libaugeas0
+- lsb-release
+- nodejs
+- powershell
+- python3
+- python3-pip
+- python3-venv
+- software-properties-common
+- terraform
+- unzip
+- yarn
+- zip
+
+package_update: true
+package_upgrade: true
+package_reboot_if_required: false
+
+write_files:
+- encoding: gzip
+  content: !!binary |
+    INSTALLSCRIPT
+  owner: root:root
+  path: /root/vstsagent.sh
+  permissions: '0744'
+
+- path: /etc/profile.d/cloudinit.sh
+  content: |
+    export PATH=$PATH:/usr/local/go/bin
+  owner: root:root
+  permissions: '0644'
+
+- path: /etc/docker/daemon.json
+  content: |
+    {
+      "data-root": "/opt/data/docker"
+    }
+  owner: root:root
+  permissions: '0644'
+
+runcmd:
+- [ mkdir, -p, /root/downloads ]
+- |
+  golangver=$(curl -s https://raw.githubusercontent.com/golang/go/release-branch.go1.16/VERSION)
+  curl -sL "https://golang.org/dl/$golangver.linux-amd64.tar.gz" -o "/root/downloads/$golangver.linux-amd64.tar.gz"
+  tar -C /usr/local -xzf "/root/downloads/$golangver.linux-amd64.tar.gz"
+- |
+  azcopytar=$(curl -sI https://aka.ms/downloadazcopy-v10-linux | grep -oE 'azcopy_linux_amd64_.*gz')
+  azcopyver=$(echo $azcopytar | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+  curl -sL https://aka.ms/downloadazcopy-v10-linux -o /root/downloads/$azcopytar
+  tar -zxf /root/downloads/$azcopytar -C /usr/local/bin --strip-components 1 azcopy_linux_amd64_$azcopyver/azcopy
+  chmod 755 /usr/local/bin/azcopy
+- [ rm, -rf, /root/downloads ]
+- [ pwsh, -nop, -nol, -noni, -Command, "Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted" ]
+- [ pwsh, -nop, -nol, -noni, -Command, "Install-Module -Name Az -Scope AllUsers -Repository 'PSGallery' -Force" ]
+- [ pwsh, -nop, -nol, -noni, -Command, "Set-PSRepository -Name 'PSGallery' -InstallationPolicy Untrusted" ]
+
+groups:
+- docker
+
+users:
+- default
