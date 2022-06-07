@@ -35,35 +35,48 @@ param (
     $placeholderText = "INSTALLSCRIPT"
 )
 
-# Make sure the install script has LF end-of-lines and is UTF8 encoded.
-$Data =  [Text.Encoding]::UTF8.GetBytes( (Get-Content $installScript | Join-String -Separator "`n") )
+function GZipText {
+  param (
+    [string]
+    $inputText
+  )
+  $data =  [Text.Encoding]::UTF8.GetBytes($inputText)
+  $output = [System.IO.MemoryStream]::new()
+  $gzipStream = New-Object System.IO.Compression.GzipStream $output, ([IO.Compression.CompressionMode]::Compress)
+  $gzipStream.Write($data, 0, $data.Length)
+  $gzipStream.Close()
+  return $output.ToArray()
+}
 
-# Now GZip and Base-64 encode the text.
-$output = [System.IO.MemoryStream]::new()
-$gzipStream = New-Object System.IO.Compression.GzipStream $output, ([IO.Compression.CompressionMode]::Compress)
-$gzipStream.Write($Data, 0, $Data.Length)
-$gzipStream.Close()
-$base64Script = [Convert]::ToBase64String($output.ToArray())
+# Make sure the install script has LF end-of-lines and is UTF8 encoded.
+$gzipData = GZipText -inputText (Get-Content $installScript | Join-String -Separator "`n")
+$base64Script = [Convert]::ToBase64String($gzipData)
 
 # Replace the placeholder text in the cloud-init with the encoded script
 $init = Get-Content $cloudInitFile `
   | ForEach-Object { $_ -replace $placeholderText, "$base64Script" } `
   | Join-String -Separator "`n"
 
-$outfile = Join-Path -Path $(Resolve-Path $cloudInitFile | Split-Path -Parent) -ChildPath 'out' -AdditionalChildPath $(Resolve-Path $cloudInitFile | Split-Path -Leaf)
+$gzipCloudConfig = GZipText -inputText $init
 
-if (!$(Test-Path $(Split-Path $outfile) -PathType Container))
+# Now GZip and base-64 encode the cloud-init file.
+$extn = Split-Path $cloudInitFile -Extension
+$outfilename = Split-Path -Path ([System.IO.Path]::ChangeExtension($cloudInitFile, "$($extn).gz")) -Leaf
+$outdir = Join-Path -Path (Split-Path (Resolve-Path $cloudInitFile) -Parent) -ChildPath 'out'
+$outfile = Join-Path -Path $outdir -ChildPath $outfilename
+
+if (!$(Test-Path $outdir -PathType Container))
 {
-  New-Item -Path $(Split-Path $outfile) -ItemType Directory | Out-Null
+  New-Item -Path $outdir -ItemType Directory | Out-Null
 }
 
-Set-Content -Path $outfile -Value $init
+Set-Content -Path $outfile -Value $gzipCloudConfig -AsByteStream
 
 # SIG # Begin signature block
 # MIIfpQYJKoZIhvcNAQcCoIIfljCCH5ICAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUezQMiEO2QU+vlBCbBzqyrtrs
-# mTWgghjDMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUkuFIDnR3PFB6OW/wLJJ4YjnH
+# FXegghjDMIIFMDCCBBigAwIBAgIQBAkYG1/Vu2Z1U0O1b5VQCDANBgkqhkiG9w0B
 # AQsFADBlMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYD
 # VQQLExB3d3cuZGlnaWNlcnQuY29tMSQwIgYDVQQDExtEaWdpQ2VydCBBc3N1cmVk
 # IElEIFJvb3QgQ0EwHhcNMTMxMDIyMTIwMDAwWhcNMjgxMDIyMTIwMDAwWjByMQsw
@@ -200,33 +213,33 @@ Set-Content -Path $outfile -Value $init
 # AxMoRGlnaUNlcnQgU0hBMiBBc3N1cmVkIElEIENvZGUgU2lnbmluZyBDQQIQCboq
 # a7YdhGGpWisLVohBRjAJBgUrDgMCGgUAoHgwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQU6fDaYzUxylzTWb0Ajwkcrv+m
-# rC8wDQYJKoZIhvcNAQEBBQAEggIAWTLJpFQBFsanZTB8/p4uTsuiE33W8gBTPvVy
-# j4hqXB1HyuXyjH+lhe10649GqxvR5OM3M2wpIlks6HXgLgGxJ+nBYNtZM2oRZQh4
-# SJHdwpMxOcHveVpF6RDPzW3KB2hHTJjoVxzCE+GLpPiEwOwlgh9j9niffWoCsZml
-# mp2mXWq7Mzv2UkpBHGlUa5kKrLxQszs++ierNIIQ0HdzB/jp9H0S1zgaoUGvVL/K
-# Y4h6kr8vRb/R7Ub5XMCoo4Hy4d+3IHGZ0BA/WR/n1efSry3pbkG5516ZZMMUODnE
-# 4hzqyWfVhB1fspKMFC0yn5uK1J2aDsd2cC+vjbzVmcaAb4cSVXaQEXsvLEB7Fnj3
-# By4JYLndWxphSAxo5wVSLf0iYNf7EMEuXJYVkEVoQY1P6rcRI48nA5FssUb4Z1HE
-# v3tjlGGmm7mNzl96frEVy4GbH3V8VEbjiZz5BTz1yWaPjfymG1VLsnaSrNuSBymo
-# g+eUQ5UlEen6DNMuwMmq7dDPXKWitQOPw/BqD7gv0VjwhxndeOeMlU2uXmuQqKeS
-# qQxfN9IvM2h8KVS3xyupb+Fg0ieUqHwA5ctHt5K1PERwVd+RmJV1DQGPWDFTX3Wp
-# pUTzA4lxBrZPoBKjkY6FM9fTGAw95Irh8MpXOdaHlv+M/WptkkZ9UqOZGKS9aIuc
-# UEn9aKWhggMgMIIDHAYJKoZIhvcNAQkGMYIDDTCCAwkCAQEwdzBjMQswCQYDVQQG
+# DAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQU93ZOjqYx/TDB4ACrabolOGuz
+# 3NowDQYJKoZIhvcNAQEBBQAEggIApXY9dfB4KGLCskL04c8lJVhvwD2lQve6PKJx
+# Mfq6IrVgJRahZKjawad4PvJgwLGp5dc8pC/KA5mhOoc1hL6iwXVMhYG7QnpBANBH
+# rTa22+SglkCZBSa23RkNhZRvVnCH1It+a2/tI+PGSRkHeTwZV65pApmw8upWLAVX
+# f83uF5Kk2CrNz9rQxEuSEKLQCt2YbrNlm/LANYrjMnXBC1k3Tud94xgcI8UghFt+
+# DDmqg7ZYudZD4/B37jroRUof1PGwzxb+lzWmrRlUt06npCfkMpPwsLadq5N1u1Br
+# dSRnIUiNCPxZ8jzP1PJqhwLGARQT27p0eD1oSHI3h56CqvEGTmGfIg03b2xp8spU
+# c1wFPHsojtF8o6itfmkjDYFWwqklxK8VqeRpG6mS5i4KIeNp3uHqPr+APplVI8/H
+# 0midQEtktMjurUBgWUACY8T6Qxnp8BNVlodP8N+9NBCaDDiWPDFv3HPisaj2Q0ZZ
+# 3eNPArvN0qKerVmmRpt4KakUoK9wlTku8QMyvC3mMNU4+Jy2/zjQnXRV2wG4p8eY
+# cAlyiU/KJ3FM4mEhKGyUd9dRT/O88rJ1IiImyocZyl3sdLSXmTS0E3kllmqr1L/s
+# nOXTa7TuKUOnHEd9bCZMnWC2BoPWgEWejCrlJCWrWhC0JpJwDNqveHCf/Uoc8CBP
+# kU5H+KahggMgMIIDHAYJKoZIhvcNAQkGMYIDDTCCAwkCAQEwdzBjMQswCQYDVQQG
 # EwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xOzA5BgNVBAMTMkRpZ2lDZXJ0
 # IFRydXN0ZWQgRzQgUlNBNDA5NiBTSEEyNTYgVGltZVN0YW1waW5nIENBAhAKekqI
 # nsmZQpAGYzhNhpedMA0GCWCGSAFlAwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqG
-# SIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjIwNTI3MTAzNjM2WjAvBgkqhkiG9w0B
-# CQQxIgQgEwrKeeLU3EOeTN60Z2mqOzSBw5hlVtDBCFhZ6zdSqpgwDQYJKoZIhvcN
-# AQEBBQAEggIArfrdJ+PNWUG6H5KDwys3MIGjqPq8HhnGNVRBO7nqnXtTQfRf9Rzb
-# 9YXDIPH5gNz8Fo2FsahaXCuxyA45hOqe1e+8qkPw7TSCS0Je2S2ILJ7I7m6IPgyu
-# tOosfczorBt/UYnTwlAsQ41lsTWTN7jxnNbHIXS+h8qoVtzhzd8ZBnOwrAQLROlD
-# yBaL/Uvi8/AEM0a5zOOD3sYgIKv6JGBSbNJfDb6WUp3W0rLU5c6bnqRB6++xk27n
-# nA2HUlIq1a1DV4vT4ZNNnfObrsKGu2o5WKtkoD9MRiPR/oK/DmkConNDTNPQ224/
-# +YUE/Rh02Eugw+xcyRFEZRlIhFuo5/5Fmg4q9o7C0ZHGmA/UijlwdTggqdZ0LKwS
-# ZRPN8SG7VTL1b6ZXFotsf8G/x6TiCkLjlZxeuO8gcf6lJ4g4cCGaLQIRPY3+L1IP
-# daWMc4dvRWWo8t8sd4qnH3pCHDuUdHnELbRv5rElGBpt3Uzk7uKKElov/uEnxNcG
-# 5y59imrTrUF2fPxK2xBNpYt73AnzoecXeK68NZGMZ229DBoxc518/wnWxTccPhnf
-# ORc5trAAkJzc26YuQ03tsJQDq+voxZg359CeY1P4Voez45KoGOwjYSmmB9z2Uj7p
-# 7NT803IVfg186hMPVX3znmvGHwU6T4JMWWa8tTR9Jxnoy94w3iVrzWQ=
+# SIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjIwNjA3MTc0NTMxWjAvBgkqhkiG9w0B
+# CQQxIgQghviA6EzmKpBFAK9nnO5vckO0Ygc+sATb7LaM6YDwWQYwDQYJKoZIhvcN
+# AQEBBQAEggIALlcq0pj9gOV0m4UVB1XjUCMuAikL3mIX3cpb+qUm58Djk1bHr6Iu
+# 57hi2NzKCWVFLoF1LLjlaX7WBuB6Xl+Qm7Yg/XuLcOWTT8UeYmQuPtI1Krvckv9d
+# v+5MYzXbhkGU62GEtC3OXhIusG8079/PbrJ8QBKjIs1my2mbdU2FARME1BqN3Cl8
+# iuhfjHpF93nqxZE9yBe50nXrGY0Sj7NDi6vO8b/cHpC5AUN35kKMMWBqaO442fEg
+# UipmsdXcILvd7PQGkYnIaJHkeeCD5U5/WV8IOkLWK+iXNfvcZyaTxDxeIbhS6Mf4
+# fZTsGL/d9UeN0v/RN5tmaOSbcbVjVorwSvbdRjg7wUyij+yxko5OLyymp2TO8E5t
+# GUbriCFYQIYC7PaXopkPca5MU0RWDjVPcuhAgggcmzy2uPZ9BsstdbvdDTGQrwcn
+# GRjBGvubxM9F2VxEUxowBwvQpp5PHeHJBkyDMx08o6bo+YhPMj8vGYfU5fEOp+tn
+# /yP6bymhWxnyZZMcFFbM8XP2/LTe6U9cSn/+RkkCWttG5Y743Tdk9Lo54li9nUkj
+# +hAeIx7fE26T2Pz2VWLRa3Zv9ZnfHBGjKxySKo3xL2No4p7R51lRNthEZOsvIKkh
+# w/ZIXj/fBvjdFkFnG2U1ha5DgK77JDQ7sqpPCTamzSWwaBGEmrkCZvo=
 # SIG # End signature block
